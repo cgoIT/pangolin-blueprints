@@ -1,0 +1,4 @@
+services:
+  app:
+    image: ghcr.io/example/app:latest
+    restart: unless-stopped

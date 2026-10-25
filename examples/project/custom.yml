@@ -1,0 +1,10 @@
+# Projektspezifische Anpassungen - bitte Kommentare behalten!
+services:
+  app:
+    labels:
+      # alte Pangolin-Konfiguration
+      - pangolin.public-resources.app.name=Old
+      - com.example.team=web   # fremdes Label muss bleiben
+  db:
+    environment:
+      TZ: Europe/Berlin  # Zeitzone

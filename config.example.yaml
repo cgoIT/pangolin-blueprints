@@ -1,0 +1,34 @@
+# Beispielkonfiguration fuer pangolin_labels.py
+# Speichern als ./pangolin-labels.yaml oder ~/.config/pangolin-labels/config.yaml
+
+# --- Pangolin Integration-API (optional, fuer automatisches Laden der Domains) ---
+# Die Integration-API muss auf dem Pangolin-Server aktiviert sein (Standard-Port 3003).
+endpoint: https://api.example.com
+# Orgs, deren Domains geladen werden. Weglassen = alle Orgs, auf die der API-Key Zugriff hat (GET /v1/orgs).
+# Einzelne Org: `org_id: meine-org`, mehrere:
+orgs: [meine-org, zweite-org]
+# Org je Newt-Netz (system.newt_net in site.config.yml des Websites-Frameworks); --org und PANGOLIN_ORG haben Vorrang
+net_orgs:
+  newt-net-a: meine-org
+  newt-net-b: zweite-org
+api_key_env: PANGOLIN_API_KEY   # API-Key im Format <id>.<secret> aus dieser Umgebungsvariable lesen
+
+# --- Fallback, falls die API nicht erreichbar ist oder nicht genutzt wird ---
+domains:
+  - example.com
+  - base: home.example.org
+    type: ns           # ns | cname | wildcard
+    org: zweite-org        # optional: zu welcher Org die Domain gehoert
+
+# --- Sites (optional) ---
+# Wenn gesetzt, wird pro Service die Site abgefragt und als targets[0].site-Label ausgegeben.
+# Der Vorschlag richtet sich nach der gewaehlten Domain. Ohne diesen Block entscheidet
+# der Newt-Connector, der die Labels liest (Site des Connectors).
+sites:
+  zuhause:
+    id: zuhause          # Identifier (niceId) der Site in Pangolin
+    org: zweite-org          # optional: Site wird nur fuer Domains dieser Org angeboten
+    domains: [home.example.org]
+  vps:
+    id: vps-frankfurt
+    domains: [example.com]
