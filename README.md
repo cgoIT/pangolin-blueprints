@@ -76,3 +76,23 @@ Die Original-Compose-Dateien werden nie veraendert (Kommentare und Formatierung 
 - Healthcheck-Hostname wird auf den Service-Namen gesetzt. Passt das nicht zum Container-Namen, von Hand korrigieren.
 - Mehrere Container, die zu einer Resource beitragen (zusaetzliche Targets, Load-Balancing), werden noch nicht unterstuetzt.
 - Nicht abgedeckt: Rules, mTLS und Maintenance-Seite (EE), private Resources, Policies.
+## Nicht-interaktiv (`--spec`)
+
+Statt der Abfrage kann eine YAML-Datei die Resources beschreiben (Blueprint-Format, je Compose-Service und Resource-Key).
+Das Tool validiert sie (Pflichtfelder, doppelte Keys/`full-domain`, tcp/udp-Regeln, Domain gehoert zur Org) und schreibt ein Compose-Override:
+
+```yaml
+services:
+  web:
+    meine-seite-web:
+      name: Meine Seite
+      mode: http
+      full-domain: example.com
+      targets:
+        - { hostname: web, method: http, port: 8080 }
+```
+
+```bash
+pangolin-labels --spec spec.yml --out compose.pangolin.yml [-p projekt] [--org meine-org]
+pangolin-labels --spec spec.yml --out compose.pangolin.yml --check   # Exit 1, wenn die Datei vom Soll abweicht
+```
