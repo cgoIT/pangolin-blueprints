@@ -1,0 +1,192 @@
+import shutil
+from pathlib import Path
+
+import pytest
+
+import pangolin_labels as pl
+
+EXAMPLE = Path(__file__).resolve().parent.parent / "examples" / "project"
+
+
+# --- Label-Erzeugung ------------------------------------------------------- #
+def test_flatten_dict_und_liste():
+    out: list[str] = []
+    pl.flatten("p", {"a": 1, "t": [{"port": 80}, {"port": 81}], "b": True}, out)
+    assert out == ["p.a=1", "p.t[0].port=80", "p.t[1].port=81", "p.b=true"]
+
+
+def test_build_labels_praefix():
+    labels = pl.build_labels("web", {"name": "Web", "mode": "http"})
+    assert labels == [
+        "pangolin.public-resources.web.name=Web",
+        "pangolin.public-resources.web.mode=http",
+    ]
+
+
+# --- Compose / Ports / Alias ---------------------------------------------- #
+@pytest.mark.parametrize(
+    "entry,expected",
+    [("8080:80", 80), ("80", 80), ("8080:80/tcp", 80), ({"target": 8080}, 8080), ("8000-8010", None), ("${PORT}", None)],
+)
+def test_parse_container_port(entry, expected):
+    assert pl.parse_container_port(entry) == expected
+
+
+def write_compose(path: Path, text: str) -> Path:
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_load_services_alias_und_healthcheck_port(tmp_path):
+    f = write_compose(tmp_path / "compose.yml", """
+services:
+  nginx:
+    image: nginx
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/_health"]
+    networks:
+      newt-net:
+        aliases: ["${COMPOSE_PROJECT_NAME}-web"]
+      internal:
+  php:
+    image: php
+    expose: ["9000"]
+    labels:
+      - pangolin.public-resources.x.name=X
+""")
+    by_name = {s.name: s for s in pl.load_services(f)}
+    assert by_name["nginx"].ports == [8080]
+    assert by_name["nginx"].alias == "${COMPOSE_PROJECT_NAME}-web"
+    assert by_name["php"].ports == [9000]
+    assert by_name["php"].has_pangolin_labels and not by_name["nginx"].has_pangolin_labels
+
+
+# --- .env / COMPOSE_FILE --------------------------------------------------- #
+def test_read_env_file(tmp_path):
+    env = write_compose(tmp_path / ".env", "# Kommentar\nexport A=1\nB='zwei'\nC=\"drei\"\nohne_gleich\n")
+    assert pl.read_env_file(env) == {"A": "1", "B": "zwei", "C": "drei"}
+    assert pl.read_env_file(tmp_path / "fehlt") == {}
+
+
+def test_load_project_beispiel():
+    services, custom, files = pl.load_project(EXAMPLE)
+    assert custom.name == "custom.yml"
+    assert [f.name for f in files] == ["compose.yml", "compose.web.yml", "custom.yml"]
+    assert all(s.compose_file == custom for s in services)
+
+
+def test_compose_file_aus_site_config(tmp_path, monkeypatch):
+    monkeypatch.delenv("COMPOSE_FILE", raising=False)
+    write_compose(tmp_path / "compose.yml", "services: {a: {image: x}}\n")
+    write_compose(tmp_path / "custom.yml", "services: {}\n")
+    write_compose(tmp_path / "site.config.yml", 'compose:\n  file: "compose.yml:custom.yml"\n')
+    files = pl.resolve_compose_files(tmp_path)  # kein .env: Doppelpunkt als Trenner
+    assert [f.name for f in files] == ["compose.yml", "custom.yml"]
+
+
+# --- Validierung ------------------------------------------------------------ #
+def good_http(**over):
+    res = {"name": "A", "mode": "http", "full-domain": "a.example.com",
+           "targets": [{"hostname": "h", "method": "http", "port": 80}]}
+    res.update(over)
+    return res
+
+
+def validate(key, res, domains=(), keys=None, doms=None):
+    return pl.validate_resource(key, res, list(domains), keys if keys is not None else set(), doms if doms is not None else set())
+
+
+def test_validate_ok():
+    errors, warnings = validate("a", good_http(), [pl.Domain(base="example.com")])
+    assert errors == [] and warnings == []
+
+
+def test_validate_domain_unbekannt_warnt():
+    errors, warnings = validate("a", good_http(), [pl.Domain(base="andere.de")])
+    assert errors == [] and len(warnings) == 1
+
+
+def test_validate_http_pflichtfelder():
+    res = good_http()
+    del res["full-domain"]
+    res["targets"][0].pop("method")
+    errors, _ = validate("a", res)
+    assert any("full-domain" in e for e in errors) and any("method" in e for e in errors)
+
+
+def test_validate_doppelte_keys_und_domains():
+    keys: set[str] = set()
+    doms: set[str] = set()
+    validate("a", good_http(), keys=keys, doms=doms)
+    errors, _ = validate("a", good_http(), keys=keys, doms=doms)
+    assert any("Key doppelt" in e for e in errors) and any("full-domain" in e and "doppelt" in e for e in errors)
+
+
+def test_validate_tcp_regeln():
+    res = {"name": "T", "mode": "tcp", "targets": [{"hostname": "h", "port": 1, "method": "http"}], "auth": {"sso-enabled": True}}
+    errors, _ = validate("t", res)
+    assert any("proxy-port" in e for e in errors)
+    assert any("auth" in e for e in errors)
+    assert any("method" in e for e in errors)
+
+
+# --- --spec ----------------------------------------------------------------- #
+SPEC = """
+services:
+  nginx:
+    site-nginx:
+      name: Site
+      mode: http
+      full-domain: site.example.com
+      targets:
+        - {hostname: "${COMPOSE_PROJECT_NAME}-web", method: http, port: 8080}
+"""
+
+
+def test_run_spec_schreibt_idempotent_und_check(tmp_path, capsys):
+    spec = write_compose(tmp_path / "spec.yml", SPEC)
+    out = tmp_path / "compose.pangolin.yml"
+    domains = [pl.Domain(base="example.com")]
+
+    assert pl.run_spec(spec, out, check=True, domains=domains) == 1  # fehlt noch
+    assert pl.run_spec(spec, out, check=False, domains=domains) == 0
+    text = out.read_text(encoding="utf-8")
+    assert text.startswith("# AUTO-GENERATED")
+    assert "pangolin.public-resources.site-nginx.full-domain=site.example.com" in text
+    assert "targets[0].hostname=${COMPOSE_PROJECT_NAME}-web" in text
+    assert pl.run_spec(spec, out, check=True, domains=domains) == 0
+
+    out.write_text(text + "# manipuliert\n", encoding="utf-8")
+    assert pl.run_spec(spec, out, check=True, domains=domains) == 1
+    assert pl.run_spec(spec, out, check=False, domains=domains) == 0  # stellt Soll wieder her
+    assert out.read_text(encoding="utf-8") == text
+
+
+def test_run_spec_ungueltig_schreibt_nichts(tmp_path):
+    spec = write_compose(tmp_path / "spec.yml", SPEC.replace("port: 8080", "port: 0"))
+    out = tmp_path / "compose.pangolin.yml"
+    assert pl.run_spec(spec, out, check=False, domains=[]) == 2
+    assert not out.exists()
+
+
+# --- write_custom ----------------------------------------------------------- #
+def test_write_custom_erhaelt_kommentare_und_fremde_labels(tmp_path):
+    pytest.importorskip("ruamel.yaml")
+    custom = tmp_path / "custom.yml"
+    shutil.copy(EXAMPLE / "custom.yml", custom)
+    new = pl.Result(custom, "app", key="app", labels=["pangolin.public-resources.app.name=Neu"])
+    pl.write_custom(custom, [new])
+    text = custom.read_text(encoding="utf-8")
+    assert "Projektspezifische Anpassungen" in text and "Zeitzone" in text  # Kommentare bleiben
+    assert "com.example.team=web" in text  # fremdes Label bleibt
+    assert "app.name=Neu" in text and "app.name=Old" not in text  # gleicher Key wird ersetzt
+    assert (tmp_path / "custom.yml.bak").is_file()
+
+
+# --- Config ------------------------------------------------------------------ #
+def test_domains_from_config_und_api_url():
+    cfg = {"domains": ["a.de", {"base": "b.de", "type": "cname", "org": "x"}]}
+    doms = pl.domains_from_config(cfg)
+    assert [(d.base, d.type, d.org) for d in doms] == [("a.de", "ns", ""), ("b.de", "cname", "x")]
+    assert pl.api_url("https://api.example.com", "/orgs") == "https://api.example.com/v1/orgs"
+    assert pl.api_url("https://api.example.com/v1/", "/orgs") == "https://api.example.com/v1/orgs"

@@ -19,3 +19,14 @@ pangolin-labels = "pangolin_labels:main"
 
 [tool.setuptools]
 py-modules = ["pangolin_labels"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 140
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501"]  # lange Hilfetexte

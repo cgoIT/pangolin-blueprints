@@ -96,3 +96,10 @@ services:
 pangolin-labels --spec spec.yml --out compose.pangolin.yml [-p projekt] [--org meine-org]
 pangolin-labels --spec spec.yml --out compose.pangolin.yml --check   # Exit 1, wenn die Datei vom Soll abweicht
 ```
+
+## Entwicklung
+
+```bash
+pip install -e ".[write]" pytest ruff
+ruff check . && pytest
+```
