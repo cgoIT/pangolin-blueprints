@@ -1,5 +1,6 @@
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -190,3 +191,70 @@ def test_domains_from_config_und_api_url():
     assert [(d.base, d.type, d.org) for d in doms] == [("a.de", "ns", ""), ("b.de", "cname", "x")]
     assert pl.api_url("https://api.example.com", "/orgs") == "https://api.example.com/v1/orgs"
     assert pl.api_url("https://api.example.com/v1/", "/orgs") == "https://api.example.com/v1/orgs"
+
+
+# --- Import (API -> Spec), mit erfundenen Antworten ------------------------------- #
+DETAIL = {"name": "Demo", "mode": "http", "fullDomain": "demo.example.com", "sso": True, "forwardIdentityHeaders": False,
+          "applyRules": True, "enabled": True, "requestHeaders": '[{"name": "X-A", "value": "1"}]'}
+TARGET = {"ip": "old-host", "port": 80, "method": "http", "enabled": True, "hcEnabled": True, "hcHostname": "old-host", "hcPort": 80,
+          "hcPath": "/", "hcScheme": "http", "hcInterval": 5, "hcHeaders": None, "path": None}
+ROLES = [{"name": "Admin", "isAdmin": True}, {"name": "Member", "isAdmin": False}]
+
+
+def test_import_uebernimmt_auth_und_laesst_admin_rolle_weg():
+    res, notes = pl.build_import_resource(DETAIL, [TARGET], ROLES, [], [], keep_healthcheck=True)
+    assert res["full-domain"] == "demo.example.com"
+    assert res["auth"] == {"sso-enabled": True, "sso-roles": ["Member"]}
+    assert res["forward-identity-headers"] is False
+    assert res["request-headers"] == [{"name": "X-A", "value": "1"}]
+    assert "site" not in res["targets"][0]
+    assert any("Regeln" in n for n in notes)  # nicht uebernommen -> Hinweis
+
+
+def test_import_healthcheck_keep_oder_disable():
+    keep, _ = pl.build_import_resource(DETAIL, [TARGET], ROLES, [], [], keep_healthcheck=True)
+    off, _ = pl.build_import_resource(DETAIL, [TARGET], ROLES, [], [], keep_healthcheck=False)
+    assert keep["targets"][0]["healthcheck"]["enabled"] is True
+    assert off["targets"][0]["healthcheck"]["enabled"] is False
+    assert off["targets"][0]["healthcheck"]["path"] == "/"  # Werte bleiben erhalten
+    no_hc, _ = pl.build_import_resource(DETAIL, [{**TARGET, "hcEnabled": False}], ROLES, [], [], keep_healthcheck=True)
+    assert "healthcheck" not in no_hc["targets"][0]
+
+
+def test_import_hostname_ersetzen_auch_im_healthcheck():
+    res, _ = pl.build_import_resource(DETAIL, [TARGET], ROLES, [], [], keep_healthcheck=True, hostname="${COMPOSE_PROJECT_NAME}-web")
+    assert res["targets"][0]["hostname"] == "${COMPOSE_PROJECT_NAME}-web"
+    assert res["targets"][0]["healthcheck"]["hostname"] == "${COMPOSE_PROJECT_NAME}-web"
+
+
+def test_import_tcp_ohne_method():
+    res, _ = pl.build_import_resource({"name": "T", "mode": "tcp", "proxyPort": 1883}, [{"ip": "mqtt", "port": 1883}], [], [], [], True)
+    assert res["proxy-port"] == 1883 and "method" not in res["targets"][0] and "full-domain" not in res
+
+
+def test_import_ergebnis_besteht_die_validierung():
+    res, _ = pl.build_import_resource(DETAIL, [TARGET], ROLES, [], [], keep_healthcheck=False)
+    errors, _ = pl.validate_resource("demo", res, [], set(), set())
+    assert errors == []
+
+
+def test_run_resources_import_schreibt_spec(tmp_path, monkeypatch):
+    summaries = {"data": {"resources": [{"resourceId": 7, "niceId": "demo-nice", "passwordId": 3, "pincodeId": None, "headerAuthId": None}]}}
+
+    def fake_api_get(endpoint, key, path):
+        if path == "/org/o/resources":
+            return summaries
+        data = {"/resource/7": DETAIL, "/resource/7/targets": {"targets": [TARGET]}, "/resource/7/roles": {"roles": ROLES}}
+        return {"data": data.get(path, {})}
+
+    monkeypatch.setattr(pl, "api_get", fake_api_get)
+    monkeypatch.setenv("PANGOLIN_API_KEY", "x.y")
+    out = tmp_path / "spec.yml"
+
+    args = SimpleNamespace(org="o", list_resources=False, import_id="demo-nice", service="web", hostname=None,
+                           healthcheck="disable", out=str(out))
+
+    assert pl.run_resources(args, {"endpoint": "https://api.example.com"}) == 0
+    spec_text = out.read_text(encoding="utf-8")
+    assert "demo-nice:" in spec_text and "enabled: false" in spec_text
+    assert pl.run_spec(out, tmp_path / "o.yml", check=False, domains=[]) == 0  # Import-Ausgabe ist eine gueltige Spec

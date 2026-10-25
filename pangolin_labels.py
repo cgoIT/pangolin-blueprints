@@ -159,6 +159,15 @@ def domains_from_api(cfg: dict) -> list[Domain]:
     return out
 
 
+def api_credentials(cfg: dict) -> tuple[str, str]:
+    endpoint = cfg.get("endpoint")
+    key_env = cfg.get("api_key_env", "PANGOLIN_API_KEY")
+    api_key = os.environ.get(key_env) or cfg.get("api_key")
+    if not (endpoint and api_key):
+        sys.exit(f"endpoint oder API-Key fehlt (Umgebungsvariable {key_env})")
+    return endpoint, api_key
+
+
 def get_domains(cfg: dict, use_api: bool) -> list[Domain]:
     if use_api and cfg.get("endpoint"):
         try:
@@ -656,6 +665,175 @@ def run_spec(spec_path: Path, out: Path, check: bool, domains: list[Domain]) -> 
     return 0
 
 
+# --------------------------------------------------------------------------- #
+# Import bestehender Resources (API -> Spec)
+# --------------------------------------------------------------------------- #
+def _drop_none(data: dict) -> dict:
+    return {k: v for k, v in data.items() if v is not None}
+
+
+def _header_list(raw) -> list[dict] | None:
+    """Request-/Response-Header aus der API (Liste oder JSON-Text) als [{name, value}]."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return None
+    if isinstance(raw, list):
+        return [{"name": str(h["name"]), "value": str(h["value"])} for h in raw if isinstance(h, dict) and "name" in h and "value" in h]
+    return None
+
+
+def build_import_resource(
+    res: dict, targets: list[dict], roles: list[dict], users: list[dict], whitelist: list[dict],
+    keep_healthcheck: bool, hostname: str | None = None,
+) -> tuple[dict, list[str]]:
+    """Resource (Detail-Antwort der API) in das Blueprint-Format uebersetzen.
+
+    Gibt (Resource, Hinweise) zurueck; die Hinweise nennen alles, was nicht uebernommen werden konnte.
+    Die Site der Targets wird bewusst weggelassen (es gilt die Site des Connectors).
+    """
+    notes: list[str] = []
+    mode = res.get("mode") or "http"
+    out: dict = {"name": res.get("name"), "mode": mode}
+    if mode == "http":
+        out["full-domain"] = res.get("fullDomain")
+    elif res.get("proxyPort"):
+        out["proxy-port"] = res["proxyPort"]
+
+    if res.get("sso") or whitelist:
+        auth: dict = {}
+        if res.get("sso"):
+            auth["sso-enabled"] = True
+            names = [r["name"] for r in roles if not r.get("isAdmin")]  # Admin-Rollen setzt Pangolin selbst
+            if names:
+                auth["sso-roles"] = names
+            # shortcut: Feldname der Benutzer (email/username) ist nicht bestaetigt, bei Bedarf anpassen
+            idents = [u.get("email") or u.get("username") for u in users]
+            if any(idents):
+                auth["sso-users"] = [i for i in idents if i]
+        mails = [w.get("email") for w in whitelist if w.get("email")]
+        if mails:
+            auth["whitelist-users"] = mails
+        if auth:
+            out["auth"] = auth
+    if res.get("forwardIdentityHeaders") is False:
+        out["forward-identity-headers"] = False
+    if res.get("setHostHeader"):
+        out["host-header"] = res["setHostHeader"]
+    if res.get("tlsServerName"):
+        out["tls-server-name"] = res["tlsServerName"]
+    for api_key, label in (("requestHeaders", "request-headers"), ("responseHeaders", "response-headers")):
+        if res.get(api_key):
+            headers = _header_list(res[api_key])
+            if headers:
+                out[label] = headers
+            else:
+                notes.append(f"{label} nicht lesbar (Format unbekannt)")
+
+    out_targets = []
+    for tgt in targets:
+        host = hostname or tgt.get("ip")
+        item: dict = {"hostname": host, "port": tgt.get("port")}
+        if mode == "http":
+            item["method"] = tgt.get("method") or "http"
+        if tgt.get("enabled") is False:
+            item["enabled"] = False
+        item.update(_drop_none({
+            "path": tgt.get("path"), "path-match": tgt.get("pathMatchType"),
+            "rewrite-path": tgt.get("rewritePath"), "rewrite-match": tgt.get("rewritePathType"),
+        }))
+        if tgt.get("hcEnabled"):
+            hc_host = tgt.get("hcHostname")
+            item["healthcheck"] = _drop_none({
+                "hostname": host if hostname and hc_host == tgt.get("ip") else hc_host,
+                "port": tgt.get("hcPort"), "enabled": keep_healthcheck, "path": tgt.get("hcPath"),
+                "scheme": tgt.get("hcScheme"), "mode": tgt.get("hcMode"), "method": tgt.get("hcMethod"),
+                "interval": tgt.get("hcInterval"), "unhealthy-interval": tgt.get("hcUnhealthyInterval"),
+                "timeout": tgt.get("hcTimeout"), "follow-redirects": tgt.get("hcFollowRedirects"),
+                "status": tgt.get("hcStatus"), "healthy-threshold": tgt.get("hcHealthyThreshold"),
+                "unhealthy-threshold": tgt.get("hcUnhealthyThreshold"),
+                "headers": _header_list(tgt.get("hcHeaders")),
+            })
+        out_targets.append(item)
+    out["targets"] = out_targets
+
+    # nicht uebernommen
+    if res.get("enabled") is False:
+        notes.append("Resource ist deaktiviert (wird beim Anwenden vermutlich aktiv)")
+    for field_name, text in (
+        ("applyRules", "Regeln (rules)"), ("mtlsEnabled", "mTLS"), ("maintenanceModeEnabled", "Wartungsmodus"),
+        ("stickySession", "Sticky Session"), ("blockAccess", "Zugriff blockiert"),
+    ):
+        if res.get(field_name):
+            notes.append(f"{text} nicht uebernommen")
+    if res.get("loadBalancingStrategy") not in (None, "", "wrr"):
+        notes.append(f"Load-Balancing-Strategie {res['loadBalancingStrategy']} nicht uebernommen")
+    if len(targets) > 1:
+        notes.append(f"{len(targets)} Targets uebernommen (Load-Balancing pruefen)")
+    return _drop_none(out), notes
+
+
+def fetch_resource_summaries(endpoint: str, api_key: str, org: str) -> list[dict]:
+    payload = api_get(endpoint, api_key, f"/org/{org}/resources")
+    return list((payload.get("data") or {}).get("resources") or [])
+
+
+def run_resources(args, cfg: dict) -> int:
+    """--list-resources / --import: bestehende Resources aus der Pangolin-API lesen."""
+    endpoint, api_key = api_credentials(cfg)
+    orgs = configured_orgs(cfg)
+    org = args.org or (orgs[0] if len(orgs) == 1 else None)
+    if not org:
+        sys.exit("Org angeben: --org <org-id>")
+    try:
+        summaries = fetch_resource_summaries(endpoint, api_key, org)
+        if args.list_resources:
+            print(f"Org {org}: {len(summaries)} Resource(s)")
+            for r in sorted(summaries, key=lambda x: ((x.get("sites") or [{}])[0].get("siteNiceId", ""), x.get("niceId", ""))):
+                site = ", ".join(s.get("siteNiceId", "?") for s in r.get("sites") or []) or "-"
+                state = "an" if r.get("enabled") else "AUS"
+                hc = "hc" if any(t.get("hcEnabled") for t in r.get("targets") or []) else "-"
+                print(f"- {r.get('niceId')}  {r.get('fullDomain') or r.get('proxyPort')}  Site: {site}  {state}  {hc}  \"{r.get('name')}\"")
+            return 0
+        match = next((r for r in summaries if args.import_id in (r.get("niceId"), str(r.get("resourceId")))), None)
+        if match is None:
+            sys.exit(f"Resource {args.import_id} nicht in Org {org} gefunden (--list-resources zeigt die niceId)")
+        rid = match["resourceId"]
+        detail = (api_get(endpoint, api_key, f"/resource/{rid}").get("data")) or {}
+        targets = ((api_get(endpoint, api_key, f"/resource/{rid}/targets").get("data")) or {}).get("targets") or []
+        extras: dict[str, list] = {}
+        for name in ("roles", "users", "whitelist"):
+            try:
+                extras[name] = ((api_get(endpoint, api_key, f"/resource/{rid}/{name}").get("data")) or {}).get(name) or []
+            except RuntimeError as exc:  # z. B. 403: dem Key fehlt die Berechtigung
+                extras[name] = []
+                print(f"[warnung] {name} nicht lesbar: {exc}", file=sys.stderr)
+    except RuntimeError as exc:
+        sys.exit(str(exc))
+
+    has_hc = any(t.get("hcEnabled") for t in targets)
+    if args.healthcheck:
+        keep = args.healthcheck == "keep"
+    else:
+        keep = ask_yes_no("Health-Check uebernehmen (sonst enabled: false)", False) if has_hc else False
+    resource, notes = build_import_resource(detail, targets, extras["roles"], extras["users"], extras["whitelist"], keep, args.hostname)
+    for key_name, text in (("passwordId", "Passwort"), ("pincodeId", "PIN"), ("headerAuthId", "Basic Auth")):
+        if match.get(key_name) is not None:
+            notes.append(f"{text} gesetzt, aber nicht lesbar: als ${{PANGOLIN_..}}-Platzhalter von Hand ergaenzen")
+    host_guess = (resource.get("targets") or [{}])[0].get("hostname") or ""
+    service = args.service or (slug(host_guess) if host_guess and not re.fullmatch(r"[\d.:]+", host_guess) else "web")
+    text = yaml.safe_dump({"services": {service: {match["niceId"]: resource}}}, sort_keys=False, width=10_000, allow_unicode=True)
+    if args.out:
+        Path(args.out).write_text(text, encoding="utf-8")
+        print(f"[geschrieben] {args.out}", file=sys.stderr)
+    else:
+        print(text, end="")
+    for note in notes:
+        print(f"[hinweis] {match['niceId']}: {note}", file=sys.stderr)
+    return 0
+
+
 def write_custom(path: Path, results: list[Result]) -> None:
     """Labels in die custom.yml einarbeiten (Kommentare bleiben dank ruamel.yaml erhalten).
 
@@ -719,11 +897,18 @@ def main() -> None:
     parser.add_argument("--spec", help="nicht-interaktiv: Resources aus dieser YAML-Datei (services: <service>: <key>: <Blueprint-Resource>) validieren und nach --out schreiben")
     parser.add_argument("--out", help="(mit --spec) Zieldatei, ein Compose-Override")
     parser.add_argument("--check", action="store_true", help="(mit --spec) nichts schreiben, Exit-Code 1 wenn --out vom Soll abweicht")
+    parser.add_argument("--list-resources", action="store_true", help="bestehende Resources der Org (--org) aus der API auflisten")
+    parser.add_argument("--import", dest="import_id", metavar="NICEID", help="eine bestehende Resource als Spec-Eintrag ausgeben (niceId aus --list-resources)")
+    parser.add_argument("--service", help="(mit --import) Compose-Service, der die Labels bekommt (Standard: Hostname des Targets)")
+    parser.add_argument("--hostname", help="(mit --import) Hostname der Targets ersetzen, z. B. ${COMPOSE_PROJECT_NAME}-web")
+    parser.add_argument("--healthcheck", choices=["keep", "disable"], help="(mit --import) Health-Check uebernehmen oder mit enabled: false uebernehmen (Standard: fragen)")
     parser.add_argument("--no-api", action="store_true", help="Pangolin-API nicht abfragen, nur Domains aus der Konfiguration verwenden")
     parser.add_argument("--list-domains", action="store_true", help="nur die verfuegbaren Domains anzeigen und beenden")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if args.list_resources or args.import_id:
+        sys.exit(run_resources(args, cfg))
     org = args.org
     if args.project:
         project_dir = Path(args.project)

@@ -130,6 +130,25 @@ pangolin-labels --spec spec.yml --out compose.pangolin.yml --check    # schreibt
 - Exit-Codes: `0` ok, `1` Abweichung (nur mit `--check`), `2` Spec ungueltig.
 - Wiederholte Laeufe aendern die Datei nicht (nur bei Unterschieden wird geschrieben), `--check` eignet sich fuer CI und Health-Checks.
 
+## Bestehende Resources uebernehmen (`--list-resources`, `--import`)
+
+Resources, die du im Dashboard angelegt hast, lassen sich als Spec-Eintrag aus der API lesen (nur lesend, der API-Key braucht
+Leserechte auf Resources, Rollen und Benutzer):
+
+```bash
+pangolin-labels --list-resources --org meine-org          # niceId, Domain, Site, an/aus, Health-Check
+pangolin-labels --import <niceId> --org meine-org --service web --out spec.yml
+```
+
+- Die `niceId` wird zum Resource-Key. Pangolin ordnet Labels mit diesem Key vermutlich der bestehenden Resource zu (ungeprueft: erst an
+  einer unkritischen Resource ausprobieren, ein Anwenden kann die Resource auf den Stand der Spec setzen).
+- `--healthcheck keep|disable`: Health-Check uebernehmen oder mit `enabled: false` (Werte bleiben erhalten). Ohne Angabe wird gefragt.
+- `--hostname '${COMPOSE_PROJECT_NAME}-web'` ersetzt den Hostnamen der Targets (auch im Health-Check). `--service` bestimmt den Compose-Service.
+- Uebernommen werden Name, Domain/`proxy-port`, SSO (Rollen ohne Admin, Benutzer, Whitelist), Identity-Header, Host-Header, TLS-Servername,
+  Request-/Response-Header, Targets (Port, Methode, Pfad-Regeln, an/aus) und Health-Check. Die Site der Targets wird weggelassen (es gilt die Site des Connectors).
+- Nicht lesbar oder nicht uebernommen (wird auf stderr als `[hinweis]` gemeldet): Passwort, PIN, Basic Auth, Regeln, mTLS, Wartungsmodus,
+  Sticky Session, Load-Balancing-Strategie.
+
 ## Entwicklung
 
 ```bash
