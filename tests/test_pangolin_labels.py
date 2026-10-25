@@ -258,3 +258,51 @@ def test_run_resources_import_schreibt_spec(tmp_path, monkeypatch):
     spec_text = out.read_text(encoding="utf-8")
     assert "demo-nice:" in spec_text and "enabled: false" in spec_text
     assert pl.run_spec(out, tmp_path / "o.yml", check=False, domains=[]) == 0  # Import-Ausgabe ist eine gueltige Spec
+
+
+# --- Status (Labels gegen Resources) ------------------------------------------------ #
+def test_collect_label_resources(tmp_path):
+    f = write_compose(tmp_path / "compose.pangolin.yml", """
+services:
+  nginx:
+    labels:
+      - pangolin.public-resources.site-web.name=Web
+      - pangolin.public-resources.site-web.full-domain=site.example.com
+      - pangolin.public-resources.site-web.targets[0].hostname=${COMPOSE_PROJECT_NAME}-web
+      - com.example.other=1
+  pma:
+    labels:
+      pangolin.public-resources.site-pma.full-domain: db.${DOMAIN}
+""")
+    found = pl.collect_label_resources([f])
+    assert found["site-web"]["domain"] == "site.example.com" and found["site-web"]["service"] == "nginx"
+    assert found["site-pma"]["domain"] == ""  # Variable: Domain unbekannt
+    assert len(found) == 2
+
+
+def test_classify_status_vier_faelle():
+    resources = [
+        {"niceId": "site-web", "fullDomain": "site.example.com"},      # Key == niceId -> ok
+        {"niceId": "wild-fox", "fullDomain": "db.example.com"},        # gleiche Domain, anderer niceId -> umbenennen
+        {"niceId": "lonely-owl", "fullDomain": "x.example.com"},       # kein Label -> offen
+    ]
+    labels = {
+        "site-web": {"domain": "site.example.com", "file": "a.yml", "service": "nginx"},
+        "site-pma": {"domain": "db.example.com", "file": "a.yml", "service": "pma"},
+        "new-one": {"domain": "new.example.com", "file": "b.yml", "service": "app"},   # keine Resource -> nur Label
+    }
+    status = pl.classify_status(resources, labels)
+    assert [k for k, _ in status["ok"]] == ["site-web"]
+    assert [(old["niceId"], k) for k, old in status["rename"]] == [("wild-fox", "site-pma")]
+    assert [k for k, _ in status["label_only"]] == ["new-one"]
+    assert [r["niceId"] for r in status["open"]] == ["lonely-owl"]
+
+
+def test_run_status_ausgabe(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("PANGOLIN_API_KEY", "x.y")
+    monkeypatch.setattr(pl, "fetch_resource_summaries", lambda *a: [{"niceId": "wild-fox", "fullDomain": "site.example.com", "name": "W"}])
+    f = write_compose(tmp_path / "c.yml", "services:\n  a:\n    labels:\n      - pangolin.public-resources.site-web.full-domain=site.example.com\n")
+    args = SimpleNamespace(org="o", compose=[str(f)], project=None)
+    assert pl.run_status(args, {"endpoint": "https://api.example.com"}) == 0
+    out = capsys.readouterr().out
+    assert "wild-fox  ->  site-web" in out and "[offen] 0" in out

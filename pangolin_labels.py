@@ -779,6 +779,87 @@ def fetch_resource_summaries(endpoint: str, api_key: str, org: str) -> list[dict
     return list((payload.get("data") or {}).get("resources") or [])
 
 
+def collect_label_resources(paths: list[Path]) -> dict[str, dict]:
+    """Resource-Keys und deren full-domain aus den pangolin.public-resources-Labels der Compose-Dateien."""
+    found: dict[str, dict] = {}
+    prefix = f"{LABEL_PREFIX}."
+    for path in paths:
+        with path.open(encoding="utf-8") as fh:
+            doc = yaml.safe_load(fh) or {}
+        for svc_name, spec in (doc.get("services") or {}).items():
+            labels = (spec or {}).get("labels") or []
+            pairs = list(labels.items()) if isinstance(labels, dict) else [str(x).split("=", 1) for x in labels if "=" in str(x)]
+            for key_path, value in pairs:
+                key_path = str(key_path)
+                if not key_path.startswith(prefix):
+                    continue
+                key, _, field_name = key_path[len(prefix):].partition(".")
+                entry = found.setdefault(key, {"domain": "", "file": path.name, "service": svc_name})
+                if field_name == "full-domain" and "${" not in str(value):
+                    entry["domain"] = str(value)
+    return found
+
+
+def classify_status(resources: list[dict], labels: dict[str, dict]) -> dict[str, list]:
+    """Pangolin-Resources (API) gegen Label-Keys abgleichen."""
+    by_nice = {r["niceId"]: r for r in resources if r.get("niceId")}
+    by_domain = {r["fullDomain"]: r for r in resources if r.get("fullDomain")}
+    result: dict[str, list] = {"ok": [], "rename": [], "label_only": [], "open": []}
+    claimed: set[str] = set()
+    for key, info in sorted(labels.items()):
+        if key in by_nice:
+            result["ok"].append((key, by_nice[key]))
+            claimed.add(key)
+            continue
+        old = by_domain.get(info["domain"]) if info["domain"] else None
+        if old is not None:
+            result["rename"].append((key, old))
+            claimed.add(old["niceId"])
+        else:
+            result["label_only"].append((key, info))
+    result["open"] = [r for r in resources if r.get("niceId") not in claimed]
+    return result
+
+
+def run_status(args, cfg: dict) -> int:
+    endpoint, api_key = api_credentials(cfg)
+    orgs = configured_orgs(cfg)
+    org = args.org or (orgs[0] if len(orgs) == 1 else None)
+    if not org:
+        sys.exit("Org angeben: --org <org-id>")
+    files = [Path(f) for f in args.compose]
+    if args.project:
+        files += resolve_compose_files(Path(args.project))
+    if not files:
+        sys.exit("Compose-Dateien mit Labels angeben (Dateien oder -p Projekt), z. B. sites/*/compose.pangolin.yml")
+    missing = [str(f) for f in files if not f.is_file()]
+    if missing:
+        sys.exit("Datei(en) nicht gefunden: " + ", ".join(missing))
+    try:
+        resources = fetch_resource_summaries(endpoint, api_key, org)
+    except RuntimeError as exc:
+        sys.exit(str(exc))
+    status = classify_status(resources, collect_label_resources(files))
+
+    def line(r: dict) -> str:
+        return f"{r.get('niceId')}  {r.get('fullDomain') or r.get('proxyPort')}  \"{r.get('name')}\""
+
+    print(f"Org {org}: {len(resources)} Resource(s)")
+    print(f"\n[umgestellt] {len(status['ok'])}  (Label-Key = Identifier der Resource)")
+    for key, _ in status["ok"]:
+        print(f"  {key}")
+    print(f"\n[umbenennen] {len(status['rename'])}  (gleiche Domain, anderer Identifier: in Pangolin den Identifier auf den Label-Key aendern)")
+    for key, old in status["rename"]:
+        print(f"  {old['niceId']}  ->  {key}   ({old.get('fullDomain')})")
+    print(f"\n[nur Label] {len(status['label_only'])}  (Label ohne Resource in dieser Org: wird beim Anwenden neu angelegt, oder falsche Org/Key)")
+    for key, info in status["label_only"]:
+        print(f"  {key}  {info['domain'] or '-'}  ({info['file']}, Service {info['service']})")
+    print(f"\n[offen] {len(status['open'])}  (Resource ohne Label)")
+    for r in sorted(status["open"], key=lambda x: x.get("niceId", "")):
+        print(f"  {line(r)}")
+    return 0
+
+
 def run_resources(args, cfg: dict) -> int:
     """--list-resources / --import: bestehende Resources aus der Pangolin-API lesen."""
     endpoint, api_key = api_credentials(cfg)
@@ -899,6 +980,7 @@ def main() -> None:
     parser.add_argument("--check", action="store_true", help="(mit --spec) nichts schreiben, Exit-Code 1 wenn --out vom Soll abweicht")
     parser.add_argument("--list-resources", action="store_true", help="bestehende Resources der Org (--org) aus der API auflisten")
     parser.add_argument("--import", dest="import_id", metavar="NICEID", help="eine bestehende Resource als Spec-Eintrag ausgeben (niceId aus --list-resources)")
+    parser.add_argument("--status", action="store_true", help="Resources der Org (--org) mit den Labels in den angegebenen Compose-Dateien/-p abgleichen: umgestellt, umbenennen, nur Label, offen")
     parser.add_argument("--service", help="(mit --import) Compose-Service, der die Labels bekommt (Standard: Hostname des Targets)")
     parser.add_argument("--hostname", help="(mit --import) Hostname der Targets ersetzen, z. B. ${COMPOSE_PROJECT_NAME}-web")
     parser.add_argument("--healthcheck", choices=["keep", "disable"], help="(mit --import) Health-Check uebernehmen oder mit enabled: false uebernehmen (Standard: fragen)")
@@ -907,6 +989,8 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if args.status:
+        sys.exit(run_status(args, cfg))
     if args.list_resources or args.import_id:
         sys.exit(run_resources(args, cfg))
     org = args.org

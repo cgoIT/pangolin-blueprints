@@ -140,14 +140,33 @@ pangolin-labels --list-resources --org meine-org          # niceId, Domain, Site
 pangolin-labels --import <niceId> --org meine-org --service web --out spec.yml
 ```
 
-- Die `niceId` wird zum Resource-Key. Pangolin ordnet Labels mit diesem Key vermutlich der bestehenden Resource zu (ungeprueft: erst an
-  einer unkritischen Resource ausprobieren, ein Anwenden kann die Resource auf den Stand der Spec setzen).
+- Die `niceId` ist der Resource-Key: Pangolin sucht beim Anwenden die Resource mit diesem Identifier in der Org und aktualisiert sie
+  (laut Pangolin-Quellcode). Dabei werden auch Auth-Einstellungen mit den Werten der Spec ueberschrieben (z. B. `sso` auf `false`, wenn es fehlt).
+  Alles Lesbare wird deshalb uebernommen; Passwort, PIN und Basic Auth muessen von Hand ergaenzt werden. Erst an einer unkritischen Resource testen.
+- Den Identifier kann man in Pangolin aendern (Buchstaben, Zahlen, Bindestriche, pro Org eindeutig). Wer sprechende Keys will, benennt zuerst
+  die Resource um und importiert sie danach (oder schreibt die Spec mit dem neuen Key).
 - `--healthcheck keep|disable`: Health-Check uebernehmen oder mit `enabled: false` (Werte bleiben erhalten). Ohne Angabe wird gefragt.
 - `--hostname '${COMPOSE_PROJECT_NAME}-web'` ersetzt den Hostnamen der Targets (auch im Health-Check). `--service` bestimmt den Compose-Service.
 - Uebernommen werden Name, Domain/`proxy-port`, SSO (Rollen ohne Admin, Benutzer, Whitelist), Identity-Header, Host-Header, TLS-Servername,
   Request-/Response-Header, Targets (Port, Methode, Pfad-Regeln, an/aus) und Health-Check. Die Site der Targets wird weggelassen (es gilt die Site des Connectors).
 - Nicht lesbar oder nicht uebernommen (wird auf stderr als `[hinweis]` gemeldet): Passwort, PIN, Basic Auth, Regeln, mTLS, Wartungsmodus,
   Sticky Session, Load-Balancing-Strategie.
+
+## Uebersicht: was ist schon umgestellt (`--status`)
+
+```bash
+pangolin-labels --status --org meine-org sites/*/compose.pangolin.yml andere/compose.yml
+pangolin-labels --status --org meine-org -p /pfad/zum/projekt
+```
+
+Gleicht die `pangolin.public-resources.<key>`-Labels der angegebenen Compose-Dateien mit den Resources der Org ab (nur lesend):
+
+- `[umgestellt]` Label-Key = Identifier einer Resource.
+- `[umbenennen]` Resource mit gleicher Domain, aber anderem Identifier: Identifier in Pangolin auf den Label-Key aendern (sonst entsteht ein Konflikt).
+- `[nur Label]` Label ohne Resource in dieser Org: wird beim Anwenden neu angelegt, oder der Key bzw. die Org stimmt nicht.
+- `[offen]` Resource ohne Label.
+
+Labels anderer Hosts werden nur gesehen, wenn ihre Compose-Dateien angegeben werden (dort aufrufen oder Dateien sammeln).
 
 ## Entwicklung
 
