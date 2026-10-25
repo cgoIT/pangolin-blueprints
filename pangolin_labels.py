@@ -26,6 +26,7 @@ LABEL_PREFIX = "pangolin.public-resources"
 CONFIG_SEARCH = [
     Path("pangolin-labels.yaml"),
     Path.home() / ".config" / "pangolin-labels" / "config.yaml",
+    Path("/etc/pangolin-labels/config.yaml"),
 ]
 # Images, die wir selbst nie veroeffentlichen wollen (Newt / Pangolin-Site-Connector)
 SKIP_IMAGE_HINTS = ("fosrl/",)

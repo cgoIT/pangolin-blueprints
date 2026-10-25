@@ -7,3 +7,5 @@ pangolin-labels.yaml
 out/
 .idea/
 CLAUDE.md
+build/
+*.egg-info/

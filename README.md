@@ -2,11 +2,22 @@
 
 Gefuehrter Generator fuer Pangolin-Blueprint-Labels (`pangolin.public-resources.*`) aus einer oder mehreren Docker-Compose-Dateien.
 
+> **Experimentell (v0.1):** bisher nur mit Beispielprojekten und einzelnen Abfragen gegen eine echte Instanz getestet, es gibt keine automatisierten Tests.
+> Generierte Labels vor dem Einsatz pruefen, `--write-custom` nur in einem Git-Repo mit Diff verwenden.
+
 ## Installation
 
+Python 3.9+. Empfohlen mit [pipx](https://pipx.pypa.io) (stellt den Befehl `pangolin-labels` bereit, ohne eigenes venv):
+
 ```bash
-pip install pyyaml        # einzige Abhaengigkeit, Python 3.9+
+pipx install "pangolin-labels[write] @ git+https://github.com/cgoIT/pangolin-blueprints.git"
+pipx upgrade pangolin-labels      # Update
 ```
+
+`[write]` installiert zusaetzlich `ruamel.yaml` fuer `--write-custom`; ohne reicht `pangolin-labels @ git+...`.
+Aus einem Checkout geht auch `pip install .` (oder `pip install -r requirements.txt` und direkt `python3 pangolin_labels.py ...`).
+
+Die Konfiguration wird gesucht in `./pangolin-labels.yaml`, `~/.config/pangolin-labels/config.yaml`, `/etc/pangolin-labels/config.yaml`.
 
 ## Nutzung
 
@@ -14,14 +25,14 @@ pip install pyyaml        # einzige Abhaengigkeit, Python 3.9+
 cp config.example.yaml pangolin-labels.yaml   # anpassen
 export PANGOLIN_API_KEY='<id>.<secret>'       # nur fuer die Domain-Abfrage per API
 
-python3 pangolin_labels.py --list-domains                 # Domains aus der API anzeigen
-python3 pangolin_labels.py stack-a/compose.yaml stack-b/compose.yaml
-python3 pangolin_labels.py compose.yaml -o out/           # zusaetzlich Compose-Override schreiben
-python3 pangolin_labels.py compose.yaml --no-api          # nur Domains aus der Konfiguration
+pangolin-labels --list-domains                 # Domains aus der API anzeigen
+pangolin-labels stack-a/compose.yaml stack-b/compose.yaml
+pangolin-labels compose.yaml -o out/           # zusaetzlich Compose-Override schreiben
+pangolin-labels compose.yaml --no-api          # nur Domains aus der Konfiguration
 
 # Projekte mit mehreren Dateien via COMPOSE_FILE (.env)
-python3 pangolin_labels.py -p /pfad/zum/projekt                  # Labels fuer custom.yml ausgeben
-python3 pangolin_labels.py -p /pfad/zum/projekt --write-custom   # direkt in custom.yml schreiben
+pangolin-labels -p /pfad/zum/projekt                  # Labels fuer custom.yml ausgeben
+pangolin-labels -p /pfad/zum/projekt --write-custom   # direkt in custom.yml schreiben
 ```
 
 ### Projektmodus (`-p`)
