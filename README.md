@@ -78,24 +78,57 @@ Die Original-Compose-Dateien werden nie veraendert (Kommentare und Formatierung 
 - Nicht abgedeckt: Rules, mTLS und Maintenance-Seite (EE), private Resources, Policies.
 ## Nicht-interaktiv (`--spec`)
 
-Statt der Abfrage kann eine YAML-Datei die Resources beschreiben (Blueprint-Format, je Compose-Service und Resource-Key).
-Das Tool validiert sie (Pflichtfelder, doppelte Keys/`full-domain`, tcp/udp-Regeln, Domain gehoert zur Org) und schreibt ein Compose-Override:
+Fuer wiederholbare Laeufe (Skripte, Frameworks, CI) beschreibt eine YAML-Datei die Resources statt der Abfrage.
+Struktur: `services:` > Name des Compose-Services > Resource-Key > Resource im Blueprint-Format
+([Referenz](https://docs.pangolin.net/manage/blueprints)). `spec.yml`:
 
 ```yaml
 services:
-  web:
-    meine-seite-web:
+  web:                              # Compose-Service, der die Labels bekommt
+    meine-seite-web:                # Resource-Key (stabile ID, pro Org eindeutig)
       name: Meine Seite
       mode: http
       full-domain: example.com
       targets:
-        - { hostname: web, method: http, port: 8080 }
+        - hostname: "${COMPOSE_PROJECT_NAME}-web"   # Compose ersetzt Variablen in Labels
+          method: http
+          port: 8080
+  admin:
+    meine-seite-admin:
+      name: Meine Seite - Admin
+      mode: http
+      full-domain: admin.example.com
+      auth: { sso-enabled: true, sso-roles: [Member] }
+      forward-identity-headers: false
+      targets:
+        - hostname: "${COMPOSE_PROJECT_NAME}-admin"
+          method: http
+          port: 80
+          healthcheck: { hostname: "${COMPOSE_PROJECT_NAME}-admin", port: 80, path: / }   # optional
+  mqtt:
+    meine-seite-mqtt:
+      name: MQTT
+      mode: tcp
+      proxy-port: 1883
+      targets:
+        - { hostname: mqtt, port: 1883 }
 ```
 
+Aufruf:
+
 ```bash
-pangolin-labels --spec spec.yml --out compose.pangolin.yml [-p projekt] [--org meine-org]
-pangolin-labels --spec spec.yml --out compose.pangolin.yml --check   # Exit 1, wenn die Datei vom Soll abweicht
+pangolin-labels --spec spec.yml --out compose.pangolin.yml            # schreibt die Datei
+pangolin-labels --spec spec.yml --out compose.pangolin.yml --check    # schreibt nichts, Exit 1 bei Abweichung
 ```
+
+- `--out` ist ein Compose-Override (`services: <name>: labels: [...]`) mit Kommentar `AUTO-GENERATED`. Er gehoert in `COMPOSE_FILE`
+  (z. B. `compose.yml:compose.pangolin.yml`); danach die Container neu erstellen (`docker compose up -d`).
+- Mit `--org meine-org` oder `-p projekt` (Org aus `PANGOLIN_ORG` bzw. `net_orgs`) wird die Domain gegen die Domains dieser Org geprueft.
+  Eine Domain ausserhalb der Org ergibt eine Warnung. `--no-api` ueberspringt die API-Abfrage.
+- Validiert werden: `targets` mit `hostname`/`port`, bei `http` `full-domain` und `method`, bei `tcp`/`udp` `proxy-port`
+  (ohne `method` und `auth`), keine doppelten Keys oder `full-domain` in einer Spec. Bei Fehlern Exit 2 und es wird nichts geschrieben.
+- Exit-Codes: `0` ok, `1` Abweichung (nur mit `--check`), `2` Spec ungueltig.
+- Wiederholte Laeufe aendern die Datei nicht (nur bei Unterschieden wird geschrieben), `--check` eignet sich fuer CI und Health-Checks.
 
 ## Entwicklung
 
