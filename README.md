@@ -2,7 +2,7 @@
 
 Gefuehrter Generator fuer Pangolin-Blueprint-Labels (`pangolin.public-resources.*`) aus einer oder mehreren Docker-Compose-Dateien.
 
-> **Experimentell (v0.1):** bisher nur mit Beispielprojekten und einzelnen Abfragen gegen eine echte Instanz getestet, es gibt keine automatisierten Tests.
+> **Experimentell (v0.2):** bisher nur mit Beispielprojekten und einzelnen Abfragen gegen eine echte Instanz getestet, es gibt keine automatisierten Tests.
 > Generierte Labels vor dem Einsatz pruefen, `--write-custom` nur in einem Git-Repo mit Diff verwenden.
 
 ## Installation
