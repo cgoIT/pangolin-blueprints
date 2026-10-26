@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pangolin-labels"
-version = "0.2.0"
+version = "0.3.0"
 description = "Gefuehrter Generator fuer Pangolin-Blueprint-Labels aus Docker-Compose-Dateien"
 readme = "README.md"
 license = { text = "MIT" }
